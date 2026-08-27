@@ -1,0 +1,41 @@
+# FROZEN DINOv3 ConvNeXt-Tiny + parallel high-res branch -> 5-level FPN -> late stride-1 fusion ->
+# Ridgepath heads. First experiment: freeze the WHOLE ConvNeXt, train only hi-res branch + FPN + head
+# at a single LR. Measures frozen-transfer of DINOv3 features as a baseline (fine-tuning deferred).
+# Pair with hires_only_ablation.yaml (identical hyperparameters, no ConvNeXt) to attribute any gain to
+# DINOv3 vs the hi-res branch: DINOv3 contribution = frozen-with-ConvNeXt - hires-only.
+#
+# PREREQS (outside this repo): `pip install timm` into torch_ssl; HF access to the license-gated
+# DINOv3 weights (huggingface-cli login / HF_TOKEN), pre-warm the cache, then HF_HUB_OFFLINE=1 for runs.
+encoder: convnext_dino_hires
+in_chans: 2
+num_classes: 9
+model_kwargs: {pretrained: true, timm_model: "convnext_tiny.dinov3_lvd1689m", hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+manifest: cache/manifest_train_local.csv    # 733 labeled tiles
+val_manifest: cache/manifest_val_local.csv  # 84 labeled tiles
+augment: true
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- frozen ConvNeXt: weights load via timm at build; freeze whole run ---
+init: timm_convnext
+freeze_encoder_epochs: 500          # == epochs -> ConvNeXt frozen for the whole run (requires_grad=False)
+freeze_encoder_eval: true           # ConvNeXt in .eval() each epoch (DropPath off; LayerNorm is batch-independent)
+
+optimizer: adamw
+lr: 0.003                           # SINGLE LR: hi-res branch + FPN + fusion + head (all random-init)
+# encoder_lr omitted -> encoder group LR gated to 0 while frozen (irrelevant here)
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5
+epochs: 500
+batch_size: 64                      # head convs run at full 512x512 -> heavier than tenxnet; tune to VRAM, keep >=8
+num_workers: 8
+amp: true                           # -> false if non-finite skips appear (fp16 over a deep trunk)
+amp_dtype: bf16                     # Ada GPU: bf16 (fp32-range exponent -> no overflow/NaN, no GradScaler); use fp16 on T4/Turing
+grad_clip: 5.0
+
+out_dir: runs/convnext_dino_hires_frozen
+seed: 0
+save_every: 10
+log_every: 20

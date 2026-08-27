@@ -1,0 +1,68 @@
+# TRANSFER: warm-start the WHOLE tenxnet_recipe seg model from the 1x-SparK NORMAL-CELL run, then
+# fine-tune UNFROZEN on the LARGE-CELL dataset.
+# Lineage: SparK 1x pretraining (ep1000) -> normal-cell seg (300 ep) -> THIS (large-cell seg).
+# Asks: does the SparK-pretrained + normal-cell-trained encoder transfer to large cells, and how does
+# that compare with the DINOv3 route (convnext_dino_hires_largecell_ft_from_80pct.yaml)?
+#
+# SOURCE CHECKPOINT (unlike the convnext arm, this one is fully converged):
+#   runs/tenxnet_recipe_spark_1x_unfrozen_normal_cell_1000/best.pth
+#   300/300 epochs completed; best val loss 0.7327 @ epoch 280 (seg 0.1763, dir_row_acc 0.680,
+#   fg_pred_bg 0.206, n_val 658). Itself init'd from cache/tenxnet_recipe_spark_1x_seg_encoder.pth.
+#
+# WHY NOT --resume: resume restores the source optimizer's param groups, so the encoder would inherit
+# the source run's hot base_lr (1e-2) and wipe what it learned. init: seg_full loads WEIGHTS ONLY and
+# builds a fresh optimizer/schedule with the small LRs below.
+#
+# ARCHITECTURE MUST MATCH THE SOURCE EXACTLY (restore_seg_full asserts 0 missing / 0 unexpected):
+# encoder tenxnet_recipe, encoder_norm bn, in_chans 2, num_classes 9, model_kwargs {} -- all copied
+# verbatim from the source run's config.json. No timm/HF download is involved on this path at all.
+encoder: tenxnet_recipe
+encoder_norm: bn
+in_chans: 2
+num_classes: 9
+model_kwargs: {}                       # RidgepathSegModel path; P1-P5 FPN + head at level 1, set by build_seg_model
+
+# --- LARGE-CELL data (full set, all tissues) ---
+manifest: cache/manifest_colon_train.csv    # 733 labeled large-cell tiles
+val_manifest: cache/manifest_colon_val.csv  #  84 labeled large-cell tiles
+augment: true                          # NO `aug:` block -> DEFAULT_AUG (mirror 0.5, rot 0/90/180/270,
+                                       # brightness 0.2, contrast 0.8-1.2). This is STRONGER than the
+                                       # source normal-cell run, which pinned mirror_prob:0 /
+                                       # rot_choices:[0]; with only 733 tiles the extra geometric aug is
+                                       # wanted, and it matches the convnext large-cell arm.
+seg_channels: [boundary, DAPI]         # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- warm-start the full normal-cell model, then fine-tune UNFROZEN ---
+init: seg_full
+seg_checkpoint: runs/tenxnet_recipe_spark_1x_unfrozen_normal_cell_1000/best.pth
+freeze_encoder_epochs: 0            # unfrozen from step 1: the encoder is already task-adapted, not raw SSL
+freeze_encoder_eval: false          # encoder in TRAIN mode -- also lets its BatchNorm running stats
+                                    # re-adapt from normal-cell to large-cell statistics
+
+optimizer: adamw
+lr: 0.0003                           # decoder/FPN/head: 10x below the source run's 1e-2. These are ALREADY
+                                    # trained, so this is co-adaptation to large cells, not fresh learning.
+encoder_lr: 0.00002                 # 20x below the decoder so the transferred features are nudged, not overwritten
+encoder_lr_follows_schedule: true   # encoder LR cosine-decays with the decoder factor
+weight_decay: 0.0001                # source used 0.0 ("match fangda"); mild wd added for a 733-tile target set
+lr_schedule: cosine                 # NOT the source's multistep: its [12000, 18000] STEP milestones were set
+                                    # for 6076 tiles and would land in the wrong place on 733 tiles
+warmup_epochs: 5                    # 5 x 46 = 230 steps; protects the warm-started encoder from an initial shock
+min_lr: 0.000001
+epochs: 200                         # 733 tiles @ bs 16 = 46 steps/epoch -> ~5.5k steps. Matches the convnext
+                                    # large-cell arm's budget so the two routes are comparable. Check
+                                    # eval.json: if best lands near 120 it was still improving.
+batch_size: 8                      # == the convnext large-cell arm -> identical 46 steps/epoch. tenxnet_recipe
+                                    # is a ~0.7M-param encoder so this is light; raise only if you also
+                                    # rescale lr, since that would change the effective LR regime.
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU: fp32-range exponent, no fp16 overflow risk
+grad_clip: null                      # loose safety net (source used null). Watch clip_frac in the log:
+                                    # ~1.0 means it is engaging every step -> raise it or set null.
+
+out_dir: runs/tenxnet_recipe_spark_colon
+seed: 0
+save_every: 10
+log_every: 10                       # 46 steps/epoch -> ~4-5 lines per epoch

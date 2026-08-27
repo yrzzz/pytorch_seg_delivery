@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Precomputed data caches and training runs
+cache/
+runs/
+reports/.ipynb_checkpoints/
+
+# Compiled cython extensions / build artifacts / logs
+*.so
+cython_ops/build/
+*.log

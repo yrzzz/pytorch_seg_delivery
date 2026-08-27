@@ -1,0 +1,62 @@
+# DATA-EFFICIENCY ABLATION of convnext_dino_hires_unfrozen_normal_cell.yaml: identical model, LR,
+# schedule, aug, loss, epochs, batch_size and seed -- the ONLY change is 10% of the training tiles.
+# Any difference vs the full-data run is therefore attributable to label volume alone.
+#
+# Train manifest built by:
+#   python data/subsample_manifest.py --src cache/manifest_cell_tenxnet_train.csv \
+#       --out cache/manifest_cell_tenxnet_train_10pct.csv --frac 0.1 --seed 0
+# Stratified by `subdir` (source slide): max(1, round(0.1*n)) tiles kept from EVERY slide, so all 64
+# slides survive (a flat 10% sample would zero out the smallest ones, which have as few as 14 tiles).
+# 6076 -> 606 tiles (9.97%), 64/64 slides, 1-52 tiles per slide. VAL IS UNCHANGED (full 658 tiles) so
+# the numbers stay comparable to every other run on this split.
+#
+# NOTE ON STEP COUNT: 606 tiles @ bs 32 = 19 steps/epoch (vs 190 on full data), so `epochs: 300` is
+# ~5.7k optimizer steps instead of ~57k. Deliberately NOT compensated: matching total steps would
+# mean 3000 passes over 606 tiles, which an unfrozen 28M-param trunk will simply memorize. Rely on
+# best.pth (lowest val loss) instead, then check eval.json -- if the best epoch lands near 300 the
+# run was still improving and is worth extending; if it lands early, more epochs won't help.
+#
+# PREREQS: timm installed; DINOv3 weights cached (HF_HUB_OFFLINE=1 for the run; pretrained: true).
+encoder: convnext_dino_hires
+in_chans: 2
+num_classes: 9
+model_kwargs: {pretrained: true, timm_model: "convnext_tiny.dinov3_lvd1689m", hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+manifest: cache/manifest_cell_tenxnet_train_90pct.csv  # 606 tiles = 10% of 6076, stratified over all 64 slides
+val_manifest: cache/manifest_cell_tenxnet_val.csv      # 658 labeled tiles -- FULL val set, not subsampled
+
+augment: true
+aug:
+  color_quant_bins: [64, 128, 256, 512]
+  color_quant_prob: 0.5
+  brightness_delta: 0.0
+  contrast_range: [1.0, 1.0]
+  mirror_prob: 0.0
+  rot_choices: [0]
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- DINOv3 encoder loaded fresh via timm; UNFROZEN whole run; decoder/heads random init ---
+init: timm_convnext
+freeze_encoder_epochs: 0            # unfrozen from step 1 (this is the point of the experiment)
+freeze_encoder_eval: false          # encoder in TRAIN mode: DropPath/stochastic-depth active
+
+optimizer: adamw
+lr: 0.003                           # decoder + hi-res + FPN + head (random init)
+encoder_lr: 0.00003                 # DINOv3 ConvNeXt: ~lr/100 so pretrained features are nudged, not wiped
+encoder_lr_follows_schedule: true   # encoder LR cosine-decays with the decoder factor
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5                    # = 95 steps here (19/epoch); warmup/total steps rescale automatically from len(loader)
+min_lr: 0.000001
+epochs: 300                         # unchanged from the full-data arm on purpose -- see NOTE ON STEP COUNT above
+batch_size: 32                      # unchanged: same effective batch as the full-data arm -> 19 steps/epoch
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU: bf16 (fp32-range exponent) removes the fp16 NaN risk of unfrozen deep-trunk training
+grad_clip: null                      # kept identical to the full-data arm (clipping DISABLED) so data volume is the only variable
+
+out_dir: runs/convnext_dino_hires_unfrozen_normal_cell_90pct_tenxnet_split
+seed: 0
+save_every: 10
+log_every: 5                         # 19 steps/epoch, so log_every 20 would emit ~1 line per epoch

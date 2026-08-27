@@ -1,0 +1,76 @@
+# FROZEN SparK-pretrained tenxnet_recipe encoder -> P1-P5 FPN -> Ridgepath head, on NORMAL-CELL data.
+# The controlled frozen counterpart of tenxnet_recipe_spark_unfrozen.yaml: identical data, aug, LR
+# schedule, batch size, epochs and seed -- ONLY the encoder is frozen. Frozen-vs-unfrozen is therefore
+# the single variable, answering "do the SparK features transfer as-is, or must they be fine-tuned?"
+#
+# BASELINE TO BEAT: the unfrozen arm (runs/tenxnet_recipe_spark_unfrozen_normal_cell_700) finished all
+# 300 epochs at best val loss 0.7338 @ epoch 219 (seg 0.1765, dir_row_acc 0.680).
+#
+# !! RUN THIS ON THE SAME NUMBER OF GPUs AS THE UNFROZEN ARM (it logged 92 steps/epoch, i.e. 3-way DDP) !!
+# lr_milestone_unit is `steps`, and DDP shards the dataset, so steps/epoch -- and therefore WHERE the
+# multistep decay fires -- depends on world size. At 92 steps/ep the [12000, 18000] milestones land at
+# epochs 130 and 195 of 300. On 1 GPU (277 steps/ep) they would land at epochs 43 and 65 instead, i.e. a
+# completely different LR schedule, which would invalidate the frozen-vs-unfrozen comparison.
+#
+# NOT the same file as configs/tenxnet_recipe/tenxnet_recipe_spark_frozen.yaml. That one is also frozen on normal-cell
+# data, but under a DIFFERENT recipe -- default aug (mirror 0.5 / rot 90s), cosine lr 3e-3, bs 32,
+# grad_clip 5.0 -- so it is not comparable to the unfrozen arm. This file is.
+#
+# Encoder weights: SparK ep700 timm-style export -> packaged via scripts/package_spark_encoder.py to
+# cache/tenxnet_recipe_spark_seg_encoder.pth (138 tensors, epoch 700, loads 0-missing/0-unexpected).
+#
+# NOTE (BN): SparK estimates BN running stats over VISIBLE (unmasked) pixels during pretraining, but a
+# frozen probe runs dense inference. freeze_encoder_eval: true keeps the encoder in .eval() so those
+# pretraining stats are used verbatim and stochastic-depth is off. This mismatch is the most likely
+# reason for a frozen probe to underperform here -- if it does, the unfrozen arm (which re-adapts BN)
+# or a BN-recalibration pass is the explanation to check first, before concluding the features are weak.
+encoder: tenxnet_recipe
+encoder_norm: bn
+in_chans: 2
+num_classes: 9
+model_kwargs: {}                       # RidgepathSegModel path; fpn/head defaults set by build_seg_model
+
+manifest: cache/manifest_cell_tenxnet_train.csv    # 6076 labeled cell-boundary tiles (tenxnet split)
+val_manifest: cache/manifest_cell_tenxnet_val.csv  # 658 labeled cell-boundary tiles
+augment: true
+aug:                                   # identical to the unfrozen arm (NOT the DEFAULT_AUG the other frozen config uses)
+  color_quant_bins: [64, 128, 256, 512]
+  color_quant_prob: 0.5
+  brightness_delta: 0.0
+  contrast_range: [1.0, 1.0]
+  mirror_prob: 0.0
+  rot_choices: [0]
+seg_channels: [boundary, DAPI]
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- load pretrained SparK encoder, then FREEZE it for the whole run ---
+init: seg_encoder
+seg_checkpoint: cache/tenxnet_recipe_spark_seg_encoder.pth
+freeze_encoder_epochs: 300          # == epochs -> requires_grad=False all run (no encoder backward, no encoder grads in the clip norm)
+freeze_encoder_eval: true           # encoder in .eval(): BN uses its pretraining running stats, stochastic-depth off
+
+optimizer: adamw
+lr: 0.01                            # decoder/head base == fangda's first stepwise value; global 88 (22x4) == fangda -> no LR scaling
+encoder_lr: 0.0001                   # INERT while frozen (train_seg gates the encoder group to lr=0); kept so the only
+encoder_lr_follows_schedule: true   # diff vs the unfrozen arm is the two freeze_* keys. Matters only if you shorten
+                                    # freeze_encoder_epochs to turn this into an LP-FT run.
+weight_decay: 0.0                   # match fangda (Adam, no wd); add back if it overfits
+lr_schedule: multistep              # == fangda's PiecewiseConstantDecay
+lr_milestone_unit: steps           # dataset/batch-INVARIANT (not raw step counts)
+lr_milestones: [12000, 18000]           # 40%/60% of 300 ep == fangda's step milestones
+lr_values: [0.01, 0.002, 0.001]     # decoder absolute LR per segment (== fangda); runtime factors [1, 0.2, 0.1]
+warmup_epochs: 5                    # kept for parity with the unfrozen arm. NOTE its stated purpose (shield the encoder
+                                    # from the random decoder's early grads) does not apply when frozen -- fangda used 0.
+min_lr: 1.0e-6
+epochs: 300
+batch_size: 22                      # per-GPU; 4 GPUs -> global 88 == fangda. Frozen means no encoder backward, so this
+                                    # FITS more -- but raising it would change the effective LR regime, so keep it for the pair.
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU (fangda used fp16 on T4; bf16 is the Ada equivalent)
+grad_clip: null                      # == fangda / == the unfrozen arm
+
+out_dir: runs/tenxnet_recipe_spark_frozen_normal_cell_700
+seed: 0
+save_every: 10
+log_every: 20

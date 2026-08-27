@@ -1,0 +1,33 @@
+# ABLATION for convnext_dino_hires_frozen.yaml: the high-res branch + FPN + head with NO ConvNeXt.
+# IDENTICAL data split / aug / loss / LR / schedule / epochs / batch_size / seed to the frozen config so
+# the ONLY difference is the presence of the frozen DINOv3 ConvNeXt features. DINOv3 contribution =
+# (frozen-with-ConvNeXt) - (this). No timm / HF needed (the encoder is nn.Identity()).
+encoder: hires_only
+in_chans: 2
+num_classes: 9
+model_kwargs: {hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+manifest: cache/manifest_train_local.csv    # 733 labeled tiles
+val_manifest: cache/manifest_val_local.csv  # 84 labeled tiles
+augment: true
+seg_channels: [boundary, DAPI]
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+init: scratch                       # genuinely all-random (no ConvNeXt, no restore)
+freeze_encoder_epochs: 0            # nothing to freeze (encoder is nn.Identity())
+
+optimizer: adamw
+lr: 0.003
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5
+epochs: 500
+batch_size: 12
+num_workers: 8
+amp: true
+grad_clip: 5.0
+
+out_dir: runs/hires_only_ablation
+seed: 0
+save_every: 10
+log_every: 20

@@ -1,0 +1,45 @@
+# RANDOM-INIT ConvNeXt-Tiny + parallel high-res branch -> Ridgepath heads.
+# CONTROL for the DINOv3 experiments: identical architecture (convnext_dino_hires) but the ConvNeXt is
+# RANDOMLY initialized (pretrained: false) and trained from scratch, unfrozen. This isolates the value
+# of DINOv3 *pretraining* from the value of the ConvNeXt *capacity/architecture*:
+#   frozen-pretrained  vs  unfrozen-pretrained  vs  THIS (unfrozen random-init)  vs  hires_only
+#   DINOv3 pretraining contribution = (pretrained runs) - (this random-init run).
+#
+# No pretrained weights are used, so NO timm download / HF access is needed (pretrained: false builds
+# the architecture with random weights).
+encoder: convnext_dino_hires
+in_chans: 2
+num_classes: 9
+# pretrained:false -> ConvNeXt built with RANDOM weights (timm_model still selects the architecture).
+model_kwargs: {pretrained: false, timm_model: "convnext_tiny.dinov3_lvd1689m", hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+manifest: cache/manifest_train_local.csv    # 733 labeled tiles
+val_manifest: cache/manifest_val_local.csv  # 84 labeled tiles
+augment: true
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- random init, whole model trained from scratch, encoder UNFROZEN the whole run ---
+init: scratch                       # no restore; ConvNeXt weights come from timm's random init at build
+freeze_encoder_epochs: 0            # nothing to freeze -- random encoder trains from step 1
+freeze_encoder_eval: false
+
+optimizer: adamw
+lr: 0.003                           # SINGLE LR for everything (encoder + hi-res + FPN + head)
+# encoder_lr omitted -> equals lr: random init has no pretrained features to protect, so the encoder
+# needs the full LR to learn (a tiny encoder_lr like the pretrained runs use would cripple it here).
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5
+min_lr: 0.000001
+epochs: 500                         # matches the pretrained runs for a fair comparison
+batch_size: 16                      # full backprop through the 28M-param trunk -> heavier than the frozen run's 64; tune to VRAM (>=8)
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU
+grad_clip: null                      # from-scratch trunks can spike early; set null to disable (watch grad_norm)
+
+out_dir: runs/convnext_dino_hires_scratch
+seed: 0
+save_every: 10
+log_every: 20

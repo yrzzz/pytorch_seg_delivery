@@ -1,0 +1,66 @@
+# TRANSFER: warm-start the WHOLE convnext_dino_hires model from the 80%-data NORMAL-CELL run, then
+# fine-tune UNFROZEN on the LARGE-CELL dataset. Asks: does a normal-cell-trained seg model transfer to
+# large cells better than starting from raw DINOv3 + a random decoder (convnext_dino_hires_unfrozen.yaml,
+# the same data/arch with init: timm_convnext)? Run that file as the control.
+#
+# WHY NOT --resume: resume restores the source optimizer's param groups, so the encoder would inherit the
+# source run's hot base_lr (3e-3) and wipe what it learned. init: seg_full loads WEIGHTS ONLY and builds a
+# fresh optimizer/schedule with the small LRs below.
+#
+# !! READ BEFORE RUNNING -- what the source checkpoint actually is !!
+# runs/.../normal_cell_80pct_.../best.pth is from EPOCH 5 of a run that stopped at epoch 18 of 300
+# (no process alive since 2026-08-07). It is the best checkpoint that run produced -- val loss bottomed
+# at 0.7340 @ epoch 5 and then climbed monotonically to 1.05 by epoch 18 while train loss kept falling,
+# i.e. it overfit almost immediately -- but it is NOT a converged "80% data model". Treat this as
+# "warm-start from a lightly-trained normal-cell model", and if you later finish that 80% run, re-point
+# seg_checkpoint at the new best.pth and rerun.
+#
+# PREREQS: timm installed. NO HF download needed (pretrained: false) -- every weight comes from
+# seg_checkpoint. Architecture must match the source run exactly; restore_seg_full asserts
+# 0 missing / 0 unexpected keys and will refuse a partial load.
+encoder: convnext_dino_hires
+in_chans: 2
+num_classes: 9
+# pretrained:false -> ConvNeXt weights come from seg_checkpoint below, not from HF.
+model_kwargs: {pretrained: false, timm_model: "convnext_tiny.dinov3_lvd1689m", hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+# --- LARGE-CELL data (same manifests as convnext_dino_hires_unfrozen.yaml) ---
+manifest: cache/manifest_ganglion_train.csv    # 733 labeled large-cell tiles
+val_manifest: cache/manifest_ganglion_val.csv  # 84 labeled large-cell tiles
+augment: true                                  # no `aug:` block -> DEFAULT_AUG (mirror 0.5, rot 0/90/180/270,
+                                               # brightness 0.2, contrast 0.8-1.2), matching the large-cell
+                                               # control config. NOTE this is STRONGER than the normal-cell
+                                               # runs, which pinned mirror_prob:0 / rot_choices:[0] -- with
+                                               # only 733 tiles the extra geometric aug is wanted.
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- warm-start the full normal-cell model, then fine-tune UNFROZEN ---
+init: seg_full
+seg_checkpoint: runs/convnext_dino_hires_unfrozen_normal_cell_80pct_tenxnet_split/best.pth
+freeze_encoder_epochs: 0            # unfrozen from step 1 (the encoder is already task-adapted, not raw DINOv3)
+freeze_encoder_eval: false          # encoder in TRAIN mode: DropPath/stochastic-depth active as regularization
+
+optimizer: adamw
+lr: 0.0003                          # decoder/hi-res/FPN/head: 10x below the from-scratch 3e-3 -- these are ALREADY
+                                    # trained, so this is co-adaptation to large cells, not fresh learning
+encoder_lr: 0.00002                 # ConvNeXt: ~15x below the decoder so the transferred features are nudged, not overwritten
+encoder_lr_follows_schedule: true   # encoder LR cosine-decays with the decoder factor
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5                    # 5 x 46 = 230 steps; protects the warm-started encoder from an initial shock
+min_lr: 0.000001
+epochs: 200                         # 733 tiles @ bs 16 = 46 steps/epoch -> ~5.5k steps. The source run overfit by
+                                    # epoch 5 on 6.7x MORE data, so expect best.pth early here too; the cosine tail
+                                    # is cheap insurance, not an expectation. Check eval.json before extending.
+batch_size: 8                      # backward flows through the 28M-param trunk at full res -- heavier than the frozen probe; tune to VRAM (>=8)
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU: bf16 (fp32-range exponent) removes the fp16 NaN risk of unfrozen deep-trunk training
+grad_clip: null                      # ENABLED (the normal-cell arms ran with null/disabled). Clips encoder-grad spikes
+                                    # from the warm-started trunk; watch clip_frac in the log (~1.0 => raise it).
+
+out_dir: runs/convnext_dino_hires_ganglion
+seed: 0
+save_every: 10
+log_every: 10                       # 46 steps/epoch -> ~4-5 lines per epoch

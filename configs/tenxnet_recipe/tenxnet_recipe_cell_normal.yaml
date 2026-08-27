@@ -1,0 +1,46 @@
+# Normal-cell (diverse ~64-tissue) ridgepath segmentation — PyTorch (pytorch_seg), FROM SCRATCH.
+# Point: train on the FULL diverse deployed set instead of the narrow large-cell set, so the model
+# generalizes instead of overfitting. Data = /mnt/deck/2/ruizhi.yuan/tenxnet_deployed_data/cell_boundary/v1.
+# REQUIRES the 3-step prep first (precompute inst_ridge cache -> build manifests); see the run notes.
+encoder: tenxnet_recipe                 # v1 stem (matches your large-cell pytorch + SSL encoder). NB: fangda's
+                                        # tenxnet cell_012226 used v0 — this is v1 for consistency/SSL transfer.
+in_chans: 2
+num_classes: 9
+
+# Exact match to Tenxnet RidgepathParser's per-image_type split:
+# seed 42, floor(0.9*N)/floor(0.1*N), with the rounding remainder unused.
+manifest: cache/manifest_cell_tenxnet_train.csv
+val_manifest: cache/manifest_cell_tenxnet_val.csv
+augment: true
+aug:
+  color_quant_bins: [64, 128, 256, 512]
+  color_quant_prob: 0.5
+  brightness_delta: 0.0
+  contrast_range: [1.0, 1.0]
+  mirror_prob: 0.0
+  rot_choices: [0]
+seg_channels: [boundary, DAPI]          # VERIFY the normal-cell .tif channel order matches this (ch0=boundary, ch1=DAPI)
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+init: scratch
+
+optimizer: adamw
+lr: 0.01                                # base LR = fangda's first stepwise value
+weight_decay: 0.0                       # match fangda (Adam, no wd); add back if it overfits
+lr_schedule: multistep                  # == fangda's PiecewiseConstantDecay, but boundaries in EPOCHS
+lr_milestone_unit: epochs               # interpret lr_milestones as epochs (converted to steps at setup)
+lr_milestones: [120, 180]               # 40%/60% of 300 ep == fangda's 12000/18000 steps at ~99 steps/ep
+lr_values: [0.01, 0.002, 0.001]         # absolute LR per segment (== fangda)
+warmup_epochs: 0                        # fangda used no warmup (flat 0.01 from step 0)
+min_lr: 1.0e-6
+grad_clip: 5.0                          # keeps fp16 finite on the T4s (watch clip_frac/grad_norm; raise if it clips every step)
+epochs: 300                             # match fangda cell_012226
+batch_size: 24                          # per-GPU; 4x T4 => global 88 (== fangda)
+num_workers: 8
+amp: true
+
+# Use a fresh run: checkpoints in tenxnet_recipe_cell_normal were trained with the old split.
+out_dir: runs/tenxnet_recipe_cell_normal_tenxnet_split
+seed: 42
+save_every: 10
+log_every: 20

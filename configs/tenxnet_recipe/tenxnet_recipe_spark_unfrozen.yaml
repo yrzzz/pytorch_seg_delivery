@@ -1,0 +1,52 @@
+# UNFROZEN (fine-tuned) SparK-pretrained tenxnet_recipe encoder -> P1-P5 FPN -> Ridgepath head.
+# Load the on-domain SparK encoder and fine-tune it end-to-end: tiny encoder LR (adapt, don't wipe the
+# SSL features) + normal decoder LR (FPN+head random). Pair with the frozen probe
+# (tenxnet_recipe_spark_frozen.yaml) to see whether fine-tuning beats frozen transfer. Because the encoder
+# is BatchNorm, training UNFROZEN also re-adapts its running stats to dense (unmasked) inputs.
+encoder: tenxnet_recipe
+encoder_norm: bn
+in_chans: 2
+num_classes: 9
+model_kwargs: {}                       # RidgepathSegModel path; fpn/head defaults set by build_seg_model
+
+manifest: cache/manifest_cell_tenxnet_train.csv    # 6076 labeled cell-boundary tiles (tenxnet split)
+val_manifest: cache/manifest_cell_tenxnet_val.csv  # 658 labeled cell-boundary tiles
+augment: true
+aug:
+  color_quant_bins: [64, 128, 256, 512]
+  color_quant_prob: 0.5
+  brightness_delta: 0.0
+  contrast_range: [1.0, 1.0]
+  mirror_prob: 0.0
+  rot_choices: [0]
+seg_channels: [boundary, DAPI]
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- load pretrained SparK encoder, then fine-tune UNFROZEN ---
+init: seg_encoder
+seg_checkpoint: cache/tenxnet_recipe_spark_1x_seg_encoder.pth
+freeze_encoder_epochs: 0            # unfrozen from step 1
+freeze_encoder_eval: false          # encoder in TRAIN mode (BN running-stats update, stochastic-depth active)
+
+optimizer: adamw
+lr: 0.01                            # decoder/head base == fangda's first stepwise value; global 88 (22x4) == fangda -> no LR scaling
+encoder_lr: 0.0001                   # pretrained SparK encoder ~lr/10: adapt SSL features, don't wipe them
+encoder_lr_follows_schedule: true   # encoder tracks the SAME multistep decay at its 1/10 scale
+weight_decay: 0.0                   # match fangda (Adam, no wd); add back if it overfits
+lr_schedule: multistep              # == fangda's PiecewiseConstantDecay
+lr_milestone_unit: steps           # dataset/batch-INVARIANT (not raw step counts)
+lr_milestones: [12000, 18000]           # 40%/60% of 300 ep == fangda's step milestones
+lr_values: [0.01, 0.002, 0.001]     # decoder absolute LR per segment (== fangda); runtime factors [1, 0.2, 0.1]
+warmup_epochs: 5                    # FT-only: shield the encoder from the random decoder's early grads (fangda used 0, from-scratch)
+min_lr: 1.0e-6
+epochs: 300
+batch_size: 22                      # per-GPU; 4 GPUs -> global 88 == fangda
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU (fangda used fp16 on T4; bf16 is the Ada equivalent)
+grad_clip: null                      # == fangda
+
+out_dir: runs/tenxnet_recipe_spark_1x_unfrozen_normal_cell_500
+seed: 0
+save_every: 10
+log_every: 20

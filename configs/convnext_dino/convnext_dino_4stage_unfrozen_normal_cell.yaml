@@ -1,0 +1,51 @@
+# DINOv3 ConvNeXt-Tiny 4-stage backbone ONLY (NO parallel high-res branch) -> 4-stage FPN (P2-P5,
+# strides 4/8/16/32) -> Ridgepath head at level 2 (stride 4) -> bilinear x4 to full res.
+# Ablation vs convnext_dino_hires: isolates what the DINOv3 ConvNeXt trunk contributes on its own.
+# NOTE: finest feature is stride-4, so boundaries will be coarser than the hi-res variant (that branch
+# exists precisely to recover full-res edge detail) -- expected trade-off, this is the comparison arm.
+#
+# Standalone UNFROZEN run: ConvNeXt initialized from DINOv3, trained end-to-end from epoch 0 with a tiny
+# encoder LR (nudge, don't wipe) alongside a from-scratch FPN + head. Mirrors convnext_dino_hires_unfrozen.
+# PREREQS: timm installed; DINOv3 weights cached (HF_HUB_OFFLINE=1 for the run; pretrained: true).
+encoder: convnext_dino
+in_chans: 2
+num_classes: 9
+model_kwargs: {pretrained: true, timm_model: "convnext_tiny.dinov3_lvd1689m"}
+
+manifest: cache/manifest_cell_tenxnet_train.csv    # 6076 labeled cell-boundary tiles (tenxnet split)
+val_manifest: cache/manifest_cell_tenxnet_val.csv  # 658 labeled cell-boundary tiles
+augment: true
+aug:
+  color_quant_bins: [64, 128, 256, 512]
+  color_quant_prob: 0.5
+  brightness_delta: 0.0
+  contrast_range: [1.0, 1.0]
+  mirror_prob: 0.0
+  rot_choices: [0]
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- DINOv3 encoder loaded fresh via timm; UNFROZEN whole run; FPN + head random init ---
+init: timm_convnext
+freeze_encoder_epochs: 0            # unfrozen from step 1
+freeze_encoder_eval: false          # encoder in TRAIN mode: DropPath/stochastic-depth active
+
+optimizer: adamw
+lr: 0.003                           # FPN + head (random init) -- same as the hi-res unfrozen arm
+encoder_lr: 0.00003                 # DINOv3 ConvNeXt ~lr/100: nudge pretrained features, don't wipe
+encoder_lr_follows_schedule: true   # encoder LR cosine-decays with the decoder factor
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5                    # protects the pretrained encoder from the random decoder's early gradient shock
+min_lr: 0.000001
+epochs: 300
+batch_size: 32                      # ConvNeXt-Tiny (~28M) unfrozen; tune to VRAM (matches the hi-res arm)
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU
+grad_clip: null
+
+out_dir: runs/convnext_dino_4stage_unfrozen_normal_cell
+seed: 0
+save_every: 10
+log_every: 20

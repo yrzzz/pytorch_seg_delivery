@@ -1,0 +1,49 @@
+# UNFROZEN DINOv3 ConvNeXt-Tiny + parallel high-res branch -> Ridgepath heads.
+# A STANDALONE experiment (NOT a continuation of the frozen probe): the ConvNeXt is initialized from
+# DINOv3 pretrained weights and trained UNFROZEN from epoch 0, alongside a from-scratch decoder/heads.
+# Differential LR: tiny encoder LR (nudge DINOv3, don't overwrite) + normal decoder LR (random init).
+# Compare against the frozen probe (frozen config) to see whether joint fine-tuning helps or hurts.
+#
+# NOTE: this is the riskier arm on purpose -- a random decoder emits large early gradients into the
+# encoder, which can damage pretrained features before the decoder stabilizes (exactly why the frozen
+# probe / LP-FT exists as the safer baseline). Small encoder_lr + warmup mitigate it.
+#
+# ALTERNATIVE (not this file): warm-start the whole trained probe model then fine-tune -> use
+# convnext_dino_hires_ft.yaml (init: seg_full). That is an OPTION, not the default.
+#
+# PREREQS: timm installed; DINOv3 weights cached (HF_HUB_OFFLINE=1 for the run; pretrained:true).
+encoder: convnext_dino_hires
+in_chans: 2
+num_classes: 9
+model_kwargs: {pretrained: true, timm_model: "convnext_tiny.dinov3_lvd1689m", hires_c0: 32, hires_c1: 32, gn_groups: 8}
+
+manifest: cache/manifest_train_local.csv    # 733 labeled tiles
+val_manifest: cache/manifest_val_local.csv  # 84 labeled tiles
+augment: true
+seg_channels: [boundary, DAPI]                 # ch0=boundary, ch1=DAPI
+target_params: {dist_cutoff: 15.0, weight_sigma: 1.0, smooth_range: 3, weighted_loss: true}
+
+# --- DINOv3 encoder loaded fresh via timm; UNFROZEN whole run; decoder/heads random init ---
+init: timm_convnext
+freeze_encoder_epochs: 0            # unfrozen from step 1 (this is the point of the experiment)
+freeze_encoder_eval: false          # encoder in TRAIN mode: DropPath/stochastic-depth active
+
+optimizer: adamw
+lr: 0.003                           # decoder + hi-res + FPN + head (random init) -- same as the frozen probe's single LR
+encoder_lr: 0.00003                 # DINOv3 ConvNeXt: ~lr/100 so pretrained features are nudged, not wiped
+encoder_lr_follows_schedule: true   # encoder LR cosine-decays with the decoder factor
+weight_decay: 0.0001
+lr_schedule: cosine
+warmup_epochs: 5                    # protects the pretrained encoder from the random decoder's early gradient shock
+min_lr: 0.000001
+epochs: 500                         # full run (decoder trains from scratch) -- matches the frozen probe for a fair comparison
+batch_size: 16                      # backward now flows through the 28M-param trunk + full-res activations -> much heavier than the frozen run's 64; tune to VRAM (>=8)
+num_workers: 8
+amp: true
+amp_dtype: bf16                     # Ada GPU: bf16 (fp32-range exponent) removes the fp16 NaN risk of unfrozen deep-trunk training
+grad_clip: null                      # tighter than the probe's 5.0 -- clip encoder-grad spikes
+
+out_dir: runs/convnext_dino_hires_unfrozen
+seed: 0
+save_every: 10
+log_every: 20
