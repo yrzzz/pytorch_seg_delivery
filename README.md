@@ -95,7 +95,44 @@ point `--cache` and `--inst-ridge-root` to the same full cache to generate every
 
 ### 1. Create `inst_ridge`
 
-Run the offline protobuf conversion with Tenxnet's Bazel Python and runfiles:
+Run the offline protobuf conversion with Tenxnet's Bazel Python and runfiles. Any user with access
+to Tenxnet can run this step; no personal Tenxnet code changes or GPU are required. They need a
+working Bazel toolchain, read access to the raw image/annotation data, and write access to the output
+directory. Use the same Tenxnet commit when exact reproducibility matters.
+
+On a new machine, derive the generated Bazel paths instead of copying another user's Bazel cache
+path:
+
+```bash
+TENXNET_REPO=/path/to/tenxnet
+SEG_REPO=/path/to/pytorch_seg_delivery
+RAW_ROOT=/path/to/tenxnet_deployed_data/cell_boundary/v1
+OUTPUT_ROOT=/path/to/precompute_output
+
+cd "${TENXNET_REPO}"
+bazel build //bin:train
+
+BAZEL_BIN="$(bazel info bazel-bin)"
+BAZEL_PYTHON="${BAZEL_BIN}/external/anaconda/bin/python3"
+TENXNET_RUNFILES="${BAZEL_BIN}/bin/train.runfiles/com_github_10XDev_tenxnet"
+
+test -x "${BAZEL_PYTHON}"
+test -d "${TENXNET_RUNFILES}"
+mkdir -p "${OUTPUT_ROOT}"
+
+cd "${SEG_REPO}"
+PYTHONPATH="${TENXNET_RUNFILES}" "${BAZEL_PYTHON}" \
+  data/precompute_inst_ridge.py \
+  --root "${RAW_ROOT}" \
+  --cache "${OUTPUT_ROOT}" \
+  --manifest "${OUTPUT_ROOT}/manifest_full.csv" \
+  --anno-names cell large_cell
+```
+
+Add `--limit 16` for a small smoke test. Omit it to preprocess the complete dataset.
+
+The following is the known-working current-node version retained for reference. Its username,
+Bazel cache hash, and absolute directories are machine-specific and must not be copied unchanged:
 
 ```bash
 SEG_REPO=/mnt/home/ruizhi.yuan/pytorch_seg_delivery
