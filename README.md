@@ -27,8 +27,22 @@ restore.py              checkpoint restoration helpers
 
 ## Environment
 
-Use a Python environment with a CUDA-compatible PyTorch build when training on GPU, then install the
-remaining packages from `requirements.txt`.
+Create the complete Conda environment directly from the checked-in specification, then activate it:
+
+```bash
+cd /path/to/pytorch_seg_delivery
+conda env create --name torch_ssl --file torch_ssl.yml
+conda activate torch_ssl
+```
+
+Passing `--name torch_ssl` overrides the machine-specific `prefix` recorded in the exported YAML,
+so the environment is created under the current user's Conda installation. If the environment
+already exists, update it instead:
+
+```bash
+conda env update --name torch_ssl --file torch_ssl.yml --prune
+conda activate torch_ssl
+```
 
 Build the standalone Ridgepath extensions once:
 
