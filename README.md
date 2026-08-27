@@ -53,6 +53,12 @@ export PYTORCH_SEG_ARTIFACT_ROOT=/path/to/pytorch_seg_artifacts
 That directory should contain the referenced `cache/` manifests/checkpoints and receives configured
 `runs/` outputs. Absolute paths in a config remain unchanged.
 
+Important: all CSV manifests under `pytorch_seg_delivery/cache/` contain environment-specific
+locations in their `image_path` and `inst_ridge_path` columns. Before training or exporting on a
+new machine, update both columns in every manifest to point to the corresponding image and
+`inst_ridge` data directories on that machine. Copying the manifests does not rewrite these paths
+automatically.
+
 ## Pipeline
 
 1. Convert instance-label protobufs to cached `inst_ridge.npy` arrays with
